@@ -12,7 +12,6 @@ import time
 
 # --- Configuration ---
 # Your Vercel frontend URL is the *only* allowed origin for CORS requests.
-# This fixes the Network Error when the frontend tries to contact the backend.
 FRONTEND_URL = "https://exoplanet-frontend.vercel.app" 
 
 app = Flask(__name__)
@@ -21,14 +20,12 @@ CORS(app, resources={r"/*": {"origins": FRONTEND_URL}})
 
 
 # --- LLM API Configuration (Leave as blank string) ---
-# NOTE: The Canvas environment automatically provides the API key at runtime.
 GEMINI_API_KEY = ""
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent"
 
 def generate_llm_summary(df_summary):
     """Generates a contextual summary using the Gemini API."""
     
-    # Format the DataFrame summary into a readable string
     summary_text = df_summary.to_string()
     
     system_prompt = (
@@ -59,13 +56,12 @@ def generate_llm_summary(df_summary):
             response.raise_for_status() 
             
             result = response.json()
-            # Extract the text from the response
             if result and 'candidates' in result and result['candidates']:
                 return result['candidates'][0]['content']['parts'][0]['text']
             return "Analysis successful, but LLM summary failed to generate text."
 
         except requests.exceptions.RequestException as e:
-            if attempt < max_retries - 1 and (response.status_code in [429, 500, 503] if 'response' in locals() else True):
+            if attempt < max_retries - 1 and ('response' in locals() and response.status_code in [429, 500, 503] or 'response' not in locals()):
                 wait_time = 2 ** attempt
                 time.sleep(wait_time)
                 continue
@@ -81,6 +77,7 @@ def hello_world():
     return jsonify({"message": "Exoplanet Analysis API is running!"})
 
 
+# === CRITICAL FIX: ENSURE THIS ROUTE IS PRESENT AND CORRECT ===
 @app.route('/upload', methods=['POST'])
 def upload_and_analyze():
     """Handles CSV file upload, performs analysis, and returns results."""
@@ -104,6 +101,7 @@ def upload_and_analyze():
         required_cols = ['Planet Mass (M_Jup)', 'Orbit Period (days)', 'Detection Method']
         for col in required_cols:
             if col not in df.columns:
+                # IMPORTANT: If any required column is missing, stop analysis and return error.
                 return jsonify({"error": f"Missing required column: '{col}'"}), 400
         
         # Convert numerical columns to numeric, coercing errors to NaN
@@ -112,6 +110,11 @@ def upload_and_analyze():
         
         # Drop rows with NaN values in critical columns
         df.dropna(subset=['Planet Mass (M_Jup)', 'Orbit Period (days)', 'Detection Method'], inplace=True)
+        
+        # If no data is left after cleaning, return an informative error
+        if df.empty:
+            return jsonify({"error": "No valid data rows remaining after cleaning (check for missing or non-numeric values in critical columns)."}), 400
+
 
         # 4. Perform Statistical Analysis
         stats_df = df[['Planet Mass (M_Jup)', 'Orbit Period (days)']].describe().reset_index()
@@ -119,17 +122,13 @@ def upload_and_analyze():
         
         # 5. Generate Matplotlib Plot (Planet Mass vs. Orbit Period by Detection Method)
         
-        # Define the numerical columns for the scatter plot
         x_col = 'Planet Mass (M_Jup)'
         y_col = 'Orbit Period (days)'
         
         plt.figure(figsize=(12, 8))
         
-        # Plot each detection method separately for labeling
         detection_methods = df['Detection Method'].unique()
-        
-        # Use log scale for Orbit Period for better visualization due to large range
-        plt.yscale('log')
+        plt.yscale('log') # Use log scale for Orbit Period
         
         for method in detection_methods:
             subset = df[df['Detection Method'] == method]
@@ -139,7 +138,7 @@ def upload_and_analyze():
                 label=method, 
                 alpha=0.6,
                 edgecolors='w', 
-                s=50 # size of markers
+                s=50
             )
             
         plt.xlabel(x_col, fontsize=14)
@@ -153,7 +152,7 @@ def upload_and_analyze():
         plt.savefig(img_buffer, format='png')
         img_buffer.seek(0)
         plot_base64 = base64.b64encode(img_buffer.read()).decode('utf-8')
-        plt.close() # Close the plot to free memory
+        plt.close()
 
         # 6. Generate LLM Summary
         llm_summary = generate_llm_summary(stats_df)
@@ -173,6 +172,4 @@ def upload_and_analyze():
         return jsonify({"error": f"Internal server error during analysis: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    # When running locally, you can change the host to allow external connections 
-    # and set a higher port number if needed.
     app.run(debug=True, host='0.0.0.0', port=os.environ.get('PORT', 5000))
